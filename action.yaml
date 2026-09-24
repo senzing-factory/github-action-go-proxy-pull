@@ -1,0 +1,50 @@
+name: Go Proxy Pull
+description: Warm the Go module proxy for the tag that triggered the workflow.
+author: support@senzing.com
+
+inputs:
+  goproxy:
+    description: Go module proxy to warm.
+    default: "https://proxy.golang.org"
+  import-path:
+    description: Module path to pull. Defaults to github.com/<owner>/<repo>.
+    default: ""
+  go-version:
+    description: Go version used to run `go get`.
+    default: "1.26"
+  ref:
+    description: Tag ref the module version is read from. Defaults to the ref that triggered the workflow.
+    default: ${{ github.ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        # Nothing here is built from the calling repository and `go get` runs
+        # in a temporary module, so there is no go.sum to key a cache on.
+        cache: false
+
+    # Values reach the script through `env:` and never through `${{ }}`
+    # interpolation into `run:`. A tag name is attacker-controlled -- anyone
+    # who can push a tag chooses it -- and an interpolated tag is shell code.
+    - name: Pull module version through the Go proxy
+      env:
+        # actions/setup-go exports GOTOOLCHAIN=local, which makes `go get` fail
+        # outright when the module being pulled declares a newer `go` directive
+        # than the toolchain installed above, instead of fetching the toolchain
+        # it needs. Step-level env wins over the value setup-go wrote to
+        # GITHUB_ENV, so the pull keeps working across a fleet-wide Go bump.
+        GOTOOLCHAIN: auto
+        GOPROXY: ${{ inputs.goproxy }}
+        INPUT_IMPORT_PATH: ${{ inputs.import-path }}
+        REF: ${{ inputs.ref }}
+        REPO: ${{ github.repository }}
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/go-proxy-pull.sh"
+
+branding:
+  icon: download
+  color: green

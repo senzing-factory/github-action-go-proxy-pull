@@ -1,0 +1,11 @@
+.DS_Store
+
+# Visual Studio code
+.vscode/*
+!.vscode/cspell.json
+!.vscode/settings.json
+*.code-workspace
+.history
+
+# Claude Code personal overrides
+.claude/settings.local.json

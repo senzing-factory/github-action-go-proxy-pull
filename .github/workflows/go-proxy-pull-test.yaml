@@ -1,0 +1,128 @@
+name: Test go proxy pull
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # Ref-to-module-path derivation. This is where the bugs live: a submodule tag
+  # and a major version above 1 both rewrite the module path, and a wrong path
+  # warms nothing while still reporting success. macOS is in the matrix because
+  # its system bash is 3.2 and the script has to keep working there.
+  test-unit:
+    name: "Unit: resolve package path (bats)"
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install bats (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Install bats (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bats-core
+
+      - name: Run bats tests
+        run: bats tests/
+
+  # End to end through the composite action itself, so action.yaml's wiring is
+  # covered: the input-to-env mapping, $GITHUB_ACTION_PATH resolution, the
+  # GOTOOLCHAIN override, and setup-go. The `ref` input exists for exactly this
+  # -- github.ref on a pull request is refs/pull/N/merge and names no module
+  # version -- so the job supplies the ref a tag push would have set.
+  test-action:
+    name: "Action: warm proxy for a published tag"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the action against an already published module version
+        uses: ./
+        with:
+          import-path: github.com/senzing-garage/go-helpers
+          ref: refs/tags/v0.6.17
+
+  # The same pull, driven through the script directly. It fails faster and more
+  # legibly than the composite when the derivation itself regresses, and it is
+  # the job that proves a submodule tag resolves to a module that really
+  # exists on the proxy.
+  test-integration:
+    name: "Integration: warm proxy for a submodule tag"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Pull a published submodule tag
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOTOOLCHAIN: auto
+          INPUT_IMPORT_PATH: ""
+          REF: refs/tags/config/v1.27.11
+          REPO: aws/aws-sdk-go-v2
+        run: bash go-proxy-pull.sh
+
+  # Regression guard for the GOTOOLCHAIN override in action.yaml. setup-go
+  # exports GOTOOLCHAIN=local, under which `go get` refuses to pull a module
+  # whose `go` directive is newer than the installed toolchain. go-helpers
+  # v0.6.17 declares `go 1.26.0`, so pinning the toolchain to 1.25 here makes
+  # this job fail if the override is ever dropped and pass while it is in
+  # place. Without it the mistake would stay invisible until the fleet's next
+  # Go bump, by which point the action is at @v1 in every Go repository.
+  test-gotoolchain-override:
+    name: "Regression: GOTOOLCHAIN override survives an older toolchain"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull a module that needs a newer toolchain than is installed
+        uses: ./
+        with:
+          go-version: "1.25"
+          import-path: github.com/senzing-garage/go-helpers
+          ref: refs/tags/v0.6.17
