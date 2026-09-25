@@ -6,7 +6,9 @@
 # to wait for the fetch. Nothing here writes to the calling repository.
 #
 # Inputs, all from the environment:
-#   REF                full git ref of the run, e.g. refs/tags/v1.2.3 (required)
+#   REF                full git ref of the run, e.g. refs/tags/v1.2.3 (required;
+#                      falls back to GITHUB_REF when empty or unset)
+#   GITHUB_REF         the ref of the workflow run, set by GitHub Actions
 #   REPO               <owner>/<repo>                                 (required)
 #   INPUT_IMPORT_PATH  module path override; empty means github.com/$REPO
 #   GOPROXY            proxy to warm; honored by `go get` itself
@@ -25,6 +27,15 @@
 resolve_package() {
   local ref="${REF-}" repo="${REPO-}" import_path="${INPUT_IMPORT_PATH-}"
   local tag version package major
+
+  # The `ref` input defaults to ${{ github.ref }}, so REF normally arrives
+  # filled in. An expression that evaluates to empty -- or the script being run
+  # outside the composite action -- would otherwise fail the run outright, so
+  # fall back to the ref GitHub Actions puts in the environment of every step.
+  # A non-empty REF always wins: an explicit input is a deliberate override.
+  if [[ -z "${ref}" ]]; then
+    ref="${GITHUB_REF-}"
+  fi
 
   if [[ -z "${ref}" ]]; then
     echo "[ERROR] REF is required" >&2
@@ -75,7 +86,10 @@ main() {
   resolved="$(resolve_package)"
   read -r package version <<<"${resolved}"
 
-  echo "[INFO] ref:         ${REF}"
+  # Same fallback resolve_package applied, so the log names the ref that was
+  # actually used -- and so an unset REF does not trip `set -u` here after
+  # resolve_package has already succeeded on GITHUB_REF.
+  echo "[INFO] ref:         ${REF:-${GITHUB_REF-}}"
   echo "[INFO] module:      ${package}"
   echo "[INFO] version:     ${version}"
   echo "[INFO] goproxy:     ${GOPROXY:-<go default>}"

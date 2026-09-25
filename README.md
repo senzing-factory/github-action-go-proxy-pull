@@ -107,7 +107,11 @@ here, matching the hyphenated convention used by the other
 `github.com/<owner>/<repo>` for it, so passing an empty value is the same as
 omitting the input. `ref` exists so the action can be exercised from a pull
 request, where `github.ref` is `refs/pull/N/merge` and names no module version;
-callers should leave it alone.
+callers should leave it alone. If `ref` is passed as an empty value — or the
+`${{ github.ref }}` default ever evaluates to empty — the script falls back to
+the `GITHUB_REF` environment variable that GitHub Actions sets in every step, so
+the path every caller uses cannot fail for want of a ref. A non-empty `ref`
+always wins.
 
 ## Behavior
 
@@ -143,6 +147,36 @@ outright once a module declares a newer `go` directive than the pinned
 `go-version`. The action overrides it with `GOTOOLCHAIN: auto` on the step, so a
 fleet-wide Go bump does not turn every release job red.
 
+### Private and enterprise proxies
+
+The action sets only `GOTOOLCHAIN`, `GOPROXY` and the script's own inputs on its
+step, so any other Go environment variable set at the calling job's level
+reaches `go get` unchanged. There is deliberately no input for these: they are
+variables Go already defines, and an input would be a second spelling of them
+that this action would owe a stable meaning for the life of `v1`.
+
+That matters when `goproxy` points somewhere other than the public proxy. The
+checksum database is consulted independently of `GOPROXY`, so a module that
+`sum.golang.org` has never seen fails with `verifying module: ... 404 Not Found`
+even though the proxy served it. Set `GOPRIVATE` to the matching module prefix
+on the job:
+
+```yaml
+jobs:
+  warm-proxy:
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.example.com/*
+    steps:
+      - uses: senzing-factory/github-action-go-proxy-pull@v1
+        with:
+          goproxy: https://proxy.example.com
+```
+
+`GOPRIVATE` seeds both `GONOPROXY` and `GONOSUMDB`, so it is the one to reach
+for first; set those two directly only when they need to differ from each other.
+`GONOSUMCHECK` is not recognized by modern `cmd/go` and does nothing.
+
 ## Testing
 
 `tests/resolve-package.bats` is a bats suite covering the ref-to-module-path
@@ -154,9 +188,20 @@ bats tests/
 ```
 
 [.github/workflows/go-proxy-pull-test.yaml] runs it on Ubuntu and macOS on every
-pull request, alongside two end-to-end jobs that perform a real `go mod init`
-and `go get` against `proxy.golang.org` — one through the action itself, one
-driving the script directly with a submodule tag.
+pull request, alongside four end-to-end jobs:
+
+- one through the action itself, against a published module version;
+- one driving the script directly with a submodule tag;
+- one pinning `go-version` to 1.25 and pulling a module whose `go` directive is
+  1.26, which fails if the `GOTOOLCHAIN` override is ever dropped;
+- one that builds a throwaway module, serves it from a module proxy on
+  `localhost`, points the action at that proxy and then asserts the proxy's own
+  access log shows the module was requested and that a newer toolchain was
+  fetched.
+
+The first three pull modules `proxy.golang.org` cached long ago, so they show
+the action exits 0 rather than that it did anything; the last one fails when the
+action no-ops.
 
 [.github/workflows/go-proxy-pull-test.yaml]:
   .github/workflows/go-proxy-pull-test.yaml

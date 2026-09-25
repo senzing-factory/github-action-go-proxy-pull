@@ -14,6 +14,11 @@ setup() {
   export REPO="senzing-garage/go-helpers"
   export INPUT_IMPORT_PATH=""
   BASE="github.com/${REPO}"
+
+  # REF falls back to GITHUB_REF, which is set in every GitHub Actions step --
+  # including the one that runs this suite. Clearing it keeps each case in
+  # charge of the ref under test whether the suite runs in CI or on a laptop.
+  unset GITHUB_REF
 }
 
 # --- root module -----------------------------------------------------------
@@ -163,4 +168,69 @@ setup() {
   run resolve_package
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a tag ref"* ]]
+}
+
+# --- GITHUB_REF fallback ---------------------------------------------------
+#
+# Every consumer calls the action with no inputs at all, so the `ref` input
+# takes its ${{ github.ref }} default and REF is whatever that expression
+# evaluated to. If it ever evaluates to empty the run must still resolve, from
+# the GITHUB_REF that GitHub Actions sets in the environment of every step.
+
+@test "empty REF falls back to GITHUB_REF" {
+  export REF=""
+  export GITHUB_REF="refs/tags/v1.2.3"
+  run resolve_package
+  [ "$status" -eq 0 ]
+  [ "$output" = "${BASE} v1.2.3" ]
+}
+
+@test "unset REF falls back to GITHUB_REF" {
+  unset REF
+  export GITHUB_REF="refs/tags/v1.2.3"
+  run resolve_package
+  [ "$status" -eq 0 ]
+  [ "$output" = "${BASE} v1.2.3" ]
+}
+
+@test "the GITHUB_REF fallback runs through the whole derivation" {
+  # A fallback that only handled the simple case would warm the wrong module
+  # for a submodule tag with a major above 1, and still report success.
+  export REF=""
+  export GITHUB_REF="refs/tags/examples/v3.0.0"
+  run resolve_package
+  [ "$status" -eq 0 ]
+  [ "$output" = "${BASE}/examples/v3 v3.0.0" ]
+}
+
+@test "a non-tag GITHUB_REF is rejected like a non-tag REF" {
+  export REF=""
+  export GITHUB_REF="refs/heads/main"
+  run resolve_package
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a tag ref"* ]]
+}
+
+@test "a pull request merge GITHUB_REF is rejected" {
+  export REF=""
+  export GITHUB_REF="refs/pull/42/merge"
+  run resolve_package
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a tag ref"* ]]
+}
+
+@test "empty REF with no GITHUB_REF is still a hard error" {
+  export REF=""
+  unset GITHUB_REF
+  run resolve_package
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"REF is required"* ]]
+}
+
+@test "a non-empty REF wins over GITHUB_REF" {
+  export REF="refs/tags/v1.2.3"
+  export GITHUB_REF="refs/tags/v9.9.9"
+  run resolve_package
+  [ "$status" -eq 0 ]
+  [ "$output" = "${BASE} v1.2.3" ]
 }
