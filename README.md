@@ -134,7 +134,7 @@ into a module path built out of `refs/heads/...`.
 
 Note that the tag filter in the usage example above, `v[0-9]+.[0-9]+.[0-9]+`, is
 what every existing caller uses, and it matches neither submodule tags nor
-pre-release tags. A repository that releases nested modules has to widen its own
+prerelease tags. A repository that releases nested modules has to widen its own
 filter — for example `"*/v[0-9]+.[0-9]+.[0-9]+"` — before the submodule behavior
 can ever fire.
 

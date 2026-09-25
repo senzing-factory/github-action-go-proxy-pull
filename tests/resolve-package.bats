@@ -4,6 +4,15 @@
 # derivation. The submodule-tag and major-version-suffix branches are the parts
 # that are easy to get wrong and impossible to notice failing in production: a
 # wrong module path warms nothing while reporting success.
+#
+# SC2030/SC2031 are disabled file-wide, deliberately. Every `@test` body IS a
+# subshell, so shellcheck is right that an `export` inside one does not escape
+# it -- but that is exactly the property these tests want: each case owns the
+# ref under test and must not leak it into the next. The warning's advice
+# ("that change might be lost") describes the design rather than a defect, and
+# it fires on every assignment in every case, so suppressing per-line would be
+# 30 identical directives.
+# shellcheck disable=SC2030,SC2031
 
 setup() {
   # Sourcing is side-effect free: go-proxy-pull.sh sets its shell options only
