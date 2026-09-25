@@ -203,5 +203,4 @@ The first three pull modules `proxy.golang.org` cached long ago, so they show
 the action exits 0 rather than that it did anything; the last one fails when the
 action no-ops.
 
-[.github/workflows/go-proxy-pull-test.yaml]:
-  .github/workflows/go-proxy-pull-test.yaml
+[.github/workflows/go-proxy-pull-test.yaml]: .github/workflows/go-proxy-pull-test.yaml
