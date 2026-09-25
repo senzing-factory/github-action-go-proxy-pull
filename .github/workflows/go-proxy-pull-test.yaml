@@ -126,3 +126,161 @@ jobs:
           go-version: "1.25"
           import-path: github.com/senzing-garage/go-helpers
           ref: refs/tags/v0.6.17
+
+  # The jobs above pull modules that proxy.golang.org cached long ago, so they
+  # prove the action exits 0 -- not that it did anything. A `go get` that
+  # quietly resolved nothing would look identical. This job removes the
+  # ambiguity: it builds a module that exists nowhere else, serves it from a
+  # module proxy on localhost, points the action at that proxy, and then reads
+  # the proxy's own access log. If the action no-ops, the log stays empty and
+  # the job fails.
+  #
+  # It also pins the GOTOOLCHAIN override down with a positive assertion rather
+  # than with the absence of a failure. The throwaway module declares
+  # `go 1.26.0` while the action is pinned to Go 1.25, which is exactly the
+  # shape that dies under the GOTOOLCHAIN=local that actions/setup-go exports.
+  # Asserting that a 1.26 toolchain was fetched proves the override carried the
+  # pull, rather than the case silently never arising.
+  test-action-controlled-proxy:
+    name: "Action: warm a controlled proxy and assert the pull"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Job-level env reaches the composite action's steps; action.yaml only
+      # overrides the keys it sets itself, so GOMODCACHE and GONOSUMDB survive
+      # into the `go get` while GOTOOLCHAIN and GOPROXY stay the action's.
+      # Paths are literal because the `runner` context is not available here.
+      GOMODCACHE: /tmp/go-proxy-pull-selftest/gomodcache
+      # The throwaway module is in no checksum database and the action exposes
+      # no input for that, so verification is waived for the synthetic path
+      # only. The toolchain module fetched below is still checked.
+      GONOSUMDB: example.com/*
+      MODULE_GO_DIRECTIVE: "1.26.0"
+      MODULE_PATH: example.com/go-proxy-pull-selftest
+      MODULE_VERSION: v1.0.0
+      PROXY_DIR: /tmp/go-proxy-pull-selftest/goproxy
+      PROXY_LOG: /tmp/go-proxy-pull-selftest/goproxy.log
+      PROXY_PORT: "8471"
+      PROXY_URL: http://127.0.0.1:8471
+      # Deliberately older than MODULE_GO_DIRECTIVE.
+      SETUP_GO_VERSION: "1.25"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build a throwaway module and the proxy tree that serves it
+        run: |
+          set -euo pipefail
+          mkdir -p "${PROXY_DIR}/${MODULE_PATH}/@v"
+          python3 - <<'PY'
+          import json
+          import os
+          import zipfile
+
+          module = os.environ["MODULE_PATH"]
+          version = os.environ["MODULE_VERSION"]
+          at_v = os.path.join(os.environ["PROXY_DIR"], module, "@v")
+
+          # A module proxy is a static file tree:
+          #   <module>/@v/<version>.info  version metadata
+          #   <module>/@v/<version>.mod   go.mod, read for the go directive
+          #   <module>/@v/<version>.zip   source; every path inside needs the
+          #                               <module>@<version>/ prefix or the go
+          #                               command rejects the archive
+          go_mod = "module {}\n\ngo {}\n".format(
+              module, os.environ["MODULE_GO_DIRECTIVE"]
+          )
+          source = (
+              "// Package selftest gives the module a real package.\n"
+              "package selftest\n"
+          )
+          stamp = {"Version": version, "Time": "2000-01-01T00:00:00Z"}
+
+          with open(os.path.join(at_v, version + ".mod"), "w") as handle:
+              handle.write(go_mod)
+          with open(os.path.join(at_v, version + ".info"), "w") as handle:
+              json.dump(stamp, handle)
+          with open(os.path.join(at_v, "list"), "w") as handle:
+              handle.write(version + "\n")
+
+          prefix = "{}@{}/".format(module, version)
+          zip_path = os.path.join(at_v, version + ".zip")
+          with zipfile.ZipFile(zip_path, "w") as archive:
+              archive.writestr(prefix + "go.mod", go_mod)
+              archive.writestr(prefix + "selftest.go", source)
+          PY
+          find "${PROXY_DIR}" -type f
+
+      - name: Serve the throwaway module on localhost
+        run: |
+          set -euo pipefail
+          cd "${PROXY_DIR}"
+          nohup python3 -m http.server "${PROXY_PORT}" --bind 127.0.0.1 \
+            >"${PROXY_LOG}" 2>&1 &
+          for _ in $(seq 1 40); do
+            if curl -sf -o /dev/null \
+              "${PROXY_URL}/${MODULE_PATH}/@v/list"; then
+              echo "[INFO] module proxy serving on ${PROXY_URL}"
+              exit 0
+            fi
+            sleep 0.25
+          done
+          echo "[ERROR] module proxy never came up" >&2
+          exit 1
+
+      # The public proxy is second in the GOPROXY list so the newer toolchain
+      # that the override goes looking for can still be downloaded. The
+      # throwaway module is only ever found on the first entry.
+      - name: Run the action against the controlled proxy
+        uses: ./
+        with:
+          go-version: ${{ env.SETUP_GO_VERSION }}
+          goproxy: ${{ env.PROXY_URL }},https://proxy.golang.org
+          import-path: ${{ env.MODULE_PATH }}
+          ref: refs/tags/${{ env.MODULE_VERSION }}
+
+      - name: Assert the proxy was asked for the module
+        run: |
+          set -euo pipefail
+          echo "[INFO] proxy access log:"
+          cat "${PROXY_LOG}"
+
+          failed=0
+          served() {
+            grep -q "GET /${MODULE_PATH}/@v/${1} HTTP/1.1\" 200" "${PROXY_LOG}"
+          }
+          for suffix in info mod zip; do
+            if served "${MODULE_VERSION}.${suffix}"; then
+              echo "[INFO] proxy served ${MODULE_VERSION}.${suffix}"
+            else
+              echo "[ERROR] proxy never asked for .${suffix}" >&2
+              failed=1
+            fi
+          done
+
+          cached="${GOMODCACHE}/cache/download/${MODULE_PATH}/@v"
+          cached="${cached}/${MODULE_VERSION}.zip"
+          if [[ -f "${cached}" ]]; then
+            echo "[INFO] module reached the module cache"
+          else
+            echo "[ERROR] module never reached the cache: ${cached}" >&2
+            failed=1
+          fi
+
+          # Present only if `go get` switched toolchains, which is precisely
+          # what GOTOOLCHAIN=local refuses to do. This is the regression guard.
+          if find "${GOMODCACHE}/golang.org" -maxdepth 1 \
+            -name 'toolchain@v0.0.1-go1.26.*' -print -quit 2>/dev/null |
+            grep -q .; then
+            echo "[INFO] override fired: a 1.26 toolchain was fetched"
+          else
+            echo "[ERROR] no newer toolchain fetched; GOTOOLCHAIN=local won" >&2
+            failed=1
+          fi
+
+          exit "${failed}"
